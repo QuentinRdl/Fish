@@ -6,7 +6,7 @@ LDLIBS=-lm
 # List of executables to build
 EXECUTABLES=cmdline_test fish
 
-all: $(EXECUTABLES)
+all: clean $(EXECUTABLES)
 
 cmdline_test: cmdline_test.o libcmdline.so
 	$(CC) $(LDFLAGS) $^ -o $@

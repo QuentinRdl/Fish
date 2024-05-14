@@ -1,8 +1,20 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/wait.h>
 
 #include "cmdline.h"
 
 #define BUFLEN 512
+#define DEBUG true 
+
+// Colors definition
+#define RED     "\x1b[31m"
+#define GREEN   "\x1b[32m"
+#define BLUE    "\x1b[34m"
+#define NC   "\x1b[0m"
+
 
 #define YES_NO(i) ((i) ? "Y" : "N")
 
@@ -13,7 +25,7 @@ int main() {
   line_init(&li);
 
   for (;;) {
-    printf("fish> ");
+    printf("%sfish> %s\n", BLUE, NC);
     fgets(buf, BUFLEN, stdin);
 
     int err = line_parse(&li, buf);
@@ -51,9 +63,52 @@ int main() {
 
     /* do something with li */
 
+    /* case where li is a simple command with no arguments, no '|' and no redirection */
+    if(li.n_cmds == 1 && li.cmds[0].n_args == 1) {
+      printf("%sCommande simple !%s\n", GREEN, NC);
+      /*
+      int result = system(li.cmds[0].args[0]);
+      // printf("%s", li.cmds[0].args[0]);
+      //
+      int exitCode = result & 0xFF;
+      */
+      //printf("\n%d = Res\n", result);
+
+      // Creation of a child processus
+      pid_t pid = fork();
+
+      if(pid < 0) {
+        perror("Error while creating child process");
+      } else if(pid == 0) {
+        // This is the child process
+        char *args[] = {li.cmds[0].args[0], NULL};
+        execvp(li.cmds[0].args[0], args);
+
+        // If the program gets here, it means execvp returned something
+        // which means there was an error while executing the command
+        perror("Error while executing command\n");
+      } else {
+        // Parent process, we must wait for the child process to finish
+        int status;
+        waitpid(pid, &status, 0);
+
+        // We check the exit status of the process child 
+        if(WIFEXITED(status)) {
+          int exit_status = WEXITSTATUS(status);
+          if(exit_status == 127) {
+            printf("%sUnknown command !%s\n", RED, NC);
+          } else if(exit_status != 0) {
+            printf("%s Could not run command !%s\n", RED, NC);
+          } else {
+            printf("%sRéussite !%s\n", GREEN, NC);
+          }
+        }
+      }
+    }
+
     line_reset(&li);
   }
-  
+
   return 0;
 }
 

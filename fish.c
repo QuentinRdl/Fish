@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/wait.h>
+#include <string.h>
 
 #include "cmdline.h"
 
@@ -20,7 +21,8 @@
 
 void exeSimpleCommand(struct line li);
 void printCommandLine(struct line li);
-void exitFish(int exitStatus);
+int detectInternCommand(struct cmd cmd);
+int exitFish(struct cmd command);
 
 int main() {
   struct line li;
@@ -60,17 +62,53 @@ int main() {
 /*
  * Detects if the command entered by the user is an intern command
  * \param struct line li
+ *
+ * \param int result | 0 for 'cd', 1 for 'exit' and -1 for the rest 
  */
-bool detectInternCommand(struct line li) {
-  if(li.n_cmds == 0) return true;
-  return false;
+int detectInternCommand(struct cmd cmd) {
+  char* command = cmd.args[0];
+  int len = strlen(command);
+  printf("LEN == %d\n", len);
+  if(len != 2 && len != 4) return -1; // because len("cd") == 2 and len("exit") == 4
+  else if (strcmp("cd", command) == 0) return 0;
+  else if (strcmp("exit", command) == 0) return 1;
+  return -1;
 }
 
-void exitFish(int exitStatus) {
-  exit(exitStatus);
+/*
+ * Exits fish
+ * \param struct cmd command
+ * \return int -1 if execution failed, nothing if the exit works
+ */
+int exitFish(struct cmd command) {
+  if(DEBUG) printf("EXIT FISHHHH\n\n\n\n");
+  long exitStatus = 0;
+  char *endptr;
+
+  // No parameters given, we exit with the code 0
+  if(command.n_args == 1) exit(0);
+
+  // Check the validity of the parameters given
+  if(command.n_args != 2) {
+    fprintf(stderr, "%sexit: Invalid number of arguments%s\n", RED, NC);
+  }
+  // We check if the second parameter given is not an int
+  exitStatus = strtol(command.args[1], &endptr, 10);
+  if(endptr == command.args[1] || *endptr != '\0') {
+    fprintf(stderr, "%sexit: Invalid argument \"%s\", must be a number%s\n", RED, command.args[1], NC);
+  }
+  // We exit with the code given by the user
+  printf("\n\n\nABOUT TO EXIT\n\n\n\n");
+  exit((int)exitStatus);
+}
+
+void cd(struct cmd command) {
+  if(command.n_args != 2) return;
+  return;
 }
 /*
  * Prints the whole struct line
+ * the #define DEBUG needs to be set to true
  * \param struct line li - Line to print
  * */
 void printCommandLine(struct line li) {
@@ -107,6 +145,15 @@ void printCommandLine(struct line li) {
  * \param struct line li the line to execute
 * */
 void exeSimpleCommand(struct line li) {
+  // We check if the command is an intern command
+  int internCommand = detectInternCommand(li.cmds[0]);
+  if(internCommand == 0) {
+    printf("CD\n");
+    return;
+  } else if(internCommand == 1) {
+    printf("EXIT\n");
+    exitFish(li.cmds[0]);
+  } else printf("NO CD NO EXIT\n");
 
   // Creation of a child processus
   pid_t pid = fork();
@@ -133,7 +180,6 @@ void exeSimpleCommand(struct line li) {
         if(DEBUG) printf("%sUnknown command !%s\n", RED, NC);
       } else if(exit_status != 0) {
         if(DEBUG)fprintf(stderr, "%sCould not run command !%s\n", RED, NC);
-        exit(-1);
       } else {
         if(DEBUG) printf("%sSuccess !%s\n", GREEN, NC);
         // We determine if the process was running in the BG of FG for the display

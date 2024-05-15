@@ -18,6 +18,8 @@
 
 #define YES_NO(i) ((i) ? "Y" : "N")
 
+void exeSimpleCommand(struct line li);
+
 int main() {
   struct line li;
   char buf[BUFLEN];
@@ -65,46 +67,14 @@ int main() {
 
     /* case where li is a simple command with no arguments, no '|' and no redirection */
     if(li.n_cmds == 1 && li.cmds[0].n_args == 1) {
-      printf("%sCommande simple !%s\n", GREEN, NC);
-      /*
-      int result = system(li.cmds[0].args[0]);
-      // printf("%s", li.cmds[0].args[0]);
-      //
-      int exitCode = result & 0xFF;
-      */
-      //printf("\n%d = Res\n", result);
-
-      // Creation of a child processus
-      pid_t pid = fork();
-
-      if(pid < 0) {
-        perror("Error while creating child process");
-      } else if(pid == 0) {
-        // This is the child process
-        char *args[] = {li.cmds[0].args[0], NULL};
-        execvp(li.cmds[0].args[0], args);
-
-        // If the program gets here, it means execvp returned something
-        // which means there was an error while executing the command
-        perror("Error while executing command\n");
-      } else {
-        // Parent process, we must wait for the child process to finish
-        int status;
-        waitpid(pid, &status, 0);
-
-        // We check the exit status of the process child 
-        if(WIFEXITED(status)) {
-          int exit_status = WEXITSTATUS(status);
-          if(exit_status == 127) {
-            printf("%sUnknown command !%s\n", RED, NC);
-          } else if(exit_status != 0) {
-            printf("%s Could not run command !%s\n", RED, NC);
-          } else {
-            printf("%sRéussite !%s\n", GREEN, NC);
-          }
-        }
-      }
+      if(DEBUG )printf("%sCommande simple !%s\n", GREEN, NC);
+      exeSimpleCommand(li);
+    } else if(li.n_cmds == 1 && li.cmds[0].n_args > 1) {
+      // Case where li is a simple command with arguments
+      if(DEBUG) printf("%sCommande simple AVEC arguments!%s\n", GREEN, NC);
+      exeSimpleCommand(li);
     }
+  
 
     line_reset(&li);
   }
@@ -112,3 +82,55 @@ int main() {
   return 0;
 }
 
+/*
+ * Executes simple commands with and without arguments
+ * \param struct line li the line to execute
+* */
+void exeSimpleCommand(struct line li) {
+
+  // Creation of a child processus
+  pid_t pid = fork();
+
+  if(pid < 0) {
+    perror("Error while creating child process");
+  } else if(pid == 0) {
+    // This is the child process
+    char *args[] = {li.cmds[0].args[0], NULL}; // No arguments
+    if(li.cmds[0].n_args > 1) {
+      // With arguments
+      // char *args[] = {li.cmds[0].args, NULL}; // Incompatible pointer types error
+      char *args[li.cmds[0].n_args + 2]; // + 2 for name of command and NULL and the end of the structure
+      args[0] = li.cmds[0].args[0]; // Name of the comnmand
+
+      // Copy the args
+      for(size_t i = 0; i < li.cmds[0].n_args; i++) {
+        args[i+1] = li.cmds[0].args[i];
+      }
+      args[li.cmds[0].n_args + 1] = NULL;
+      
+      execvp(li.cmds[0].args[0], args);
+    } else {
+      execvp(li.cmds[0].args[0], args);
+    }
+    
+    // If the program gets here, it means execvp returned something
+    // which means there was an error while executing the command
+    perror("Error while executing command\n");
+  } else {
+    // Parent process, we must wait for the child process to finish
+    int status;
+    waitpid(pid, &status, 0);
+
+    // We check the exit status of the process child 
+    if(WIFEXITED(status)) {
+      int exit_status = WEXITSTATUS(status);
+      if(exit_status == 127) {
+        printf("%sUnknown command !%s\n", RED, NC);
+      } else if(exit_status != 0) {
+        printf("%s Could not run command !%s\n", RED, NC);
+      } else {
+        printf("%sRéussite !%s\n", GREEN, NC);
+      }
+    }
+  }
+}

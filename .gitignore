@@ -1,5 +1,6 @@
 *.so
 *.o
 *.txt
+*.pdf
 fish
 cmdline_test

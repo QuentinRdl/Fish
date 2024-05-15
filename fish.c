@@ -15,6 +15,7 @@
 #define RED     "\x1b[31m"
 #define GREEN   "\x1b[32m"
 #define BLUE    "\x1b[34m"
+#define GRAY    "\x1b[90m"
 #define NC   "\x1b[0m"
 
 #define YES_NO(i) ((i) ? "Y" : "N")
@@ -31,7 +32,10 @@ int main() {
   line_init(&li);
 
   for (;;) {
-    printf("%sFish> %s", BLUE, NC);
+    char pwd[1024];
+    getcwd(pwd, 1024);
+    fprintf(stdout, "%s%s%s\n", GRAY, pwd, NC);
+    fprintf(stdout, "%sFish> %s", BLUE, NC);
     fgets(buf, BUFLEN, stdin);
 
     int err = line_parse(&li, buf);
@@ -102,9 +106,71 @@ int exitFish(struct cmd command) {
   exit((int)exitStatus);
 }
 
-void cd(struct cmd command) {
-  if(command.n_args != 2) return;
-  return;
+int cd(struct cmd command) {
+  char *finalPath = NULL;
+  char *first_arg = NULL;
+  char first_char;
+
+  // Check if there is no arguments we go to home dir
+  if(command.n_args == 1) {
+    printf("\n\n\n\nHOME=%s\n\n\n\n", getenv("HOME"));
+    finalPath = getenv("HOME");
+  } else if(command.n_args != 2) { // Check if there is too many args
+    fprintf(stderr, "%sErrror !%s Too many arguments for %s'cd'%s command\n", RED, NC, GREEN, NC);
+    return -1;
+  } else {
+    // Check for the ~ shortcut
+    first_arg = command.args[1];
+    first_char = first_arg[0];
+
+    if(first_char == '~') {
+      // We check if only '~' was given
+      if(first_arg[1] == '\0') {
+        // Only '~' was given
+        printf("// Only '~' was given");
+        finalPath = getenv("HOME");
+      } else {
+        /*
+        finalPath = getenv("HOME");
+        strcat(finalPath, "/");
+        strcat(finalPath, &first_arg[1]);
+        */
+
+        finalPath = malloc(strlen(getenv("HOME")) + strlen(first_arg) + 1); // +1 for null char 
+        if (finalPath == NULL) {
+          perror("Memory allocation error");
+          return -1;
+        }
+        strcpy(finalPath, getenv("HOME"));
+        strcat(finalPath, &first_arg[1]);
+
+        printf("\n\n\n\nFINALPATH=%s\n\n\n\n", finalPath);
+      }
+
+    } else {
+      // If we are here then we have the correct number of args,
+      // and finalPath has been set so we try to chdir
+      finalPath = command.args[1];
+    }
+  }
+
+  if(chdir(finalPath) == -1) {
+    // If there is a problem with chdir
+    printf("\n\n\nCATASTROPHEEEE\n\n\n");
+    if (first_char == '~' && first_arg[1] != '\0') {
+      // it means we have malloc'ed' finalPath so we must free it
+      free(finalPath);
+    }
+    perror("chdir");
+    return -1;
+  }
+
+  printf("NEW CD INTO %s\n\n\n", finalPath);
+  if (first_char == '~' && first_arg[1] != '\0') {
+    // it means we have malloc'ed' finalPath so we must free it
+    free(finalPath);
+  }
+  return 0;
 }
 /*
  * Prints the whole struct line
@@ -149,6 +215,7 @@ void exeSimpleCommand(struct line li) {
   int internCommand = detectInternCommand(li.cmds[0]);
   if(internCommand == 0) {
     printf("CD\n");
+    cd(li.cmds[0]);
     return;
   } else if(internCommand == 1) {
     printf("EXIT\n");
@@ -182,6 +249,7 @@ void exeSimpleCommand(struct line li) {
         if(DEBUG)fprintf(stderr, "%sCould not run command !%s\n", RED, NC);
       } else {
         if(DEBUG) printf("%sSuccess !%s\n", GREEN, NC);
+
         // We determine if the process was running in the BG of FG for the display
         char* state;
         if(li.background == true) {
@@ -191,7 +259,7 @@ void exeSimpleCommand(struct line li) {
         }
         fprintf(stderr, "%s%s : %d exited, status = %d%s\n",BLUE, state, pid, status, NC);
       }
-    } else if(WIFSIGNALED(status)){
+    } else if(WIFSIGNALED(status)) {
       fprintf(stderr, "Child process stopped by signal :%d\n", WTERMSIG(status));
     }
   }

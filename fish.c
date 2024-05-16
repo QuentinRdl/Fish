@@ -4,12 +4,13 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <string.h>
+#include <fcntl.h>
 
 #include "cmdline.h"
 
 #define _DEFAULT_SOURCE_
 #define BUFLEN 512
-#define DEBUG true 
+#define DEBUG false 
 
 // Colors definition
 #define RED     "\x1b[31m"
@@ -24,6 +25,7 @@ void exeSimpleCommand(struct line li);
 void printCommandLine(struct line li);
 int detectInternCommand(struct cmd cmd);
 int exitFish(struct cmd command);
+void handle_redirections(char *input_file, char *output_file, int append_mode);
 
 int main() {
   struct line li;
@@ -48,7 +50,7 @@ int main() {
 
     /* do something with li */
 
-    /* case where li is a simple command with no arguments, no '|' and no redirection */
+    // case where li is a simple command with or without arguments, but no pipes '|'
     if(li.n_cmds == 1 && li.cmds[0].n_args == 1) {
       if(DEBUG)printf("%sSimple command!%s\n", GREEN, NC);
       exeSimpleCommand(li);
@@ -57,6 +59,24 @@ int main() {
       if(DEBUG) printf("%sSimple command WITH arguments!%s\n", GREEN, NC);
       exeSimpleCommand(li);
     }
+
+    /* No entry redirection, output redirection TRUC MODE
+    char *args[] = {"ls", NULL};
+    handle_redirections(NULL, "output.txt", 0);
+    execvp(args[0], args);
+    */
+
+    /* Entry redirection from input.txt, redirection APPEND mode
+    char *args[] = {"cat", NULL};
+    handle_redirections("input.txt", "output.txt", 1);
+    execvp(args[0], args);
+    */
+
+    /* Redirection entry from input.txt, no output redirection
+    char *args[] = {"grep", "pattern", NULL};
+    handle_redirections("input.txt", NULL, 0);
+    execvp(args[0], args);
+    */
 
     line_reset(&li);
   }
@@ -72,7 +92,7 @@ int main() {
 int detectInternCommand(struct cmd cmd) {
   char* command = cmd.args[0];
   int len = strlen(command);
-  printf("LEN == %d\n", len);
+  if(DEBUG) printf("LEN == %d\n", len);
   if(len != 2 && len != 4) return -1; // because len("cd") == 2 and len("exit") == 4
   else if (strcmp("cd", command) == 0) return 0;
   else if (strcmp("exit", command) == 0) return 1;
@@ -156,7 +176,7 @@ int cd(struct cmd command) {
 
   if(chdir(finalPath) == -1) {
     // If there is a problem with chdir
-    printf("\n\n\nCATASTROPHEEEE\n\n\n");
+    if(DEBUG) printf("\n\n\nCATASTROPHEEEE\n\n\n");
     if (first_char == '~' && first_arg[1] != '\0') {
       // it means we have malloc'ed' finalPath so we must free it
       free(finalPath);
@@ -165,7 +185,7 @@ int cd(struct cmd command) {
     return -1;
   }
 
-  printf("NEW CD INTO %s\n\n\n", finalPath);
+  if(DEBUG) printf("CD INTO %s\n\n\n", finalPath);
   if (first_char == '~' && first_arg[1] != '\0') {
     // it means we have malloc'ed' finalPath so we must free it
     free(finalPath);
@@ -214,13 +234,65 @@ void exeSimpleCommand(struct line li) {
   // We check if the command is an intern command
   int internCommand = detectInternCommand(li.cmds[0]);
   if(internCommand == 0) {
-    printf("CD\n");
+    if(DEBUG) printf("CD\n");
     cd(li.cmds[0]);
     return;
   } else if(internCommand == 1) {
-    printf("EXIT\n");
+    printf("%sexiting fish...%s\n", RED, NC);
     exitFish(li.cmds[0]);
-  } else printf("NO CD NO EXIT\n");
+  } else if(DEBUG)printf("NO CD NO EXIT\n");
+
+  if(DEBUG) printf("\n\n\n%sFILE INPUT = '%s', FILE OUTPUT = '%s'%s\n\n\n", RED, li.file_input, li.file_output, NC);
+
+  // We detect if the command has a redirection of input
+  int inRedir, outRedir, append, trunc = 0;
+  if(li.file_input != NULL) {
+    if(DEBUG) printf("TREATING INPUT\n");
+    inRedir = 1;
+    if(DEBUG) printf("REDIRECTION INPUT\n\n");
+  } else {
+    if(DEBUG) printf("NO INPUT REDIRECTION\n\n");
+  }
+
+  // We detect if the command has a redirection of output
+  if(li.file_output != NULL) {
+    if(DEBUG) printf("TREATING OUTPUT\n");
+    outRedir = 1;
+    // We treat the append or trunc 
+    if(li.file_output_append) {
+      if(DEBUG) printf("APPEND\n\n");
+      append = 1;
+    } else {
+      if(DEBUG) printf("TRUNC\n\n");
+      trunc = 1;
+    }
+    if(DEBUG) printf("REDIRECTION OUTPUT\n\n");
+  } else {
+    if(DEBUG) printf("NO OUTPUT REDIRECTION\n\n");
+  }
+
+  // We set the input and output to standard I/O
+  char* input_file = NULL;
+  char* output_file = NULL;
+  // We redirect the I/O if needed
+  if(inRedir == 1) {
+    input_file = li.file_output;
+  }
+  if(outRedir == 1) {
+    output_file = li.file_output;
+  }
+
+  int saved_stdout = dup(STDOUT_FILENO); // saving the current stdout
+  // We handle the redirections
+  if(trunc == 1) {
+    if(DEBUG) printf("%sTRUNC MODE ACTIVATED !%s\n\n\n", GRAY, NC);
+    handle_redirections(input_file, output_file, 0); // trunc mode
+  } else if(append == 1){
+    if(DEBUG) printf("%sAPPEND MODE ACTIVATED !%s\n\n\n", GRAY, NC);
+    handle_redirections(input_file, output_file, 1); // append mode
+  } else {
+    if(DEBUG) printf("%sNO TRUC NOR APPEND MODE !%s\n\n\n", GRAY, NC);
+  }
 
   // Creation of a child processus
   pid_t pid = fork();
@@ -230,7 +302,6 @@ void exeSimpleCommand(struct line li) {
   } else if(pid == 0) {
     // This is the child process
     execvp(li.cmds[0].args[0], li.cmds[0].args);
-    
     // If the program gets here, it means execvp returned something
     // which means there was an error while executing the command
     perror("Error while executing command\n");
@@ -240,13 +311,16 @@ void exeSimpleCommand(struct line li) {
     int status;
     waitpid(pid, &status, 0);
 
+    dup2(saved_stdout, STDOUT_FILENO); // Restore standard output to last state
+    close(saved_stdout);
+
     // We check the exit status of the process child 
     if(WIFEXITED(status)) {
       int exit_status = WEXITSTATUS(status);
       if(exit_status == 127) {
         if(DEBUG) printf("%sUnknown command !%s\n", RED, NC);
       } else if(exit_status != 0) {
-        if(DEBUG)fprintf(stderr, "%sCould not run command !%s\n", RED, NC);
+        if(DEBUG) fprintf(stderr, "%sCould not run command !%s\n", RED, NC);
       } else {
         if(DEBUG) printf("%sSuccess !%s\n", GREEN, NC);
 
@@ -264,3 +338,55 @@ void exeSimpleCommand(struct line li) {
     }
   }
 }
+
+/*
+ * Handles redirection of standard I/O
+ * @param char* input_file the name of the input file
+ * @param char* output_file the name of the file we will use as output
+ * @param int append_mode
+ *
+ * @return void
+ * */
+void handle_redirections(char *input_file, char *output_file, int append_mode) {
+  // We handle the case where we have an input file
+  if(input_file) {
+    printf("TREATING INPUT FILE which is : '%s'\n", input_file);
+    int input_fd = open(input_file, O_RDONLY);
+    if(input_fd == -1) {
+      perror("Error while opening input file");
+      exit(EXIT_FAILURE);
+    }
+
+    dup2(input_fd, STDIN_FILENO);
+    close(input_fd);
+  }
+
+  // We handle the case where we have an output file
+  if(output_file) {
+    printf("TREATING OUTPUT FILE which is : '%s'\n", output_file);
+    int flags = O_WRONLY | O_CREAT;
+    // We check the value of append_mode to toggle it or not
+    if(append_mode) {
+      // We toggle
+      flags |= O_APPEND;
+    } else {
+      flags |= O_TRUNC;
+    }
+
+    int output_fd = open(output_file, flags, 0644);
+    if(output_fd == -1) {
+      perror("Error opening output file");
+      exit(EXIT_FAILURE);
+    }
+    // close(STDOUT_FILENO);
+    dup2(output_fd, STDOUT_FILENO);
+    close(output_fd);
+  }
+}
+
+/*
+int detect_append_mode(struct cmd commad) {
+  
+}
+*/
+

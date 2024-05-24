@@ -36,9 +36,26 @@ void sigint_handler();
 void sigint_default(struct sigaction sigint_default);
 
 void sigchld_handler(int const signum);
+void print_finished_bg_processes();
+
+void print_queue();
+
+struct bg_status_node {
+    pid_t pid;
+    int status;
+    bool finished;
+    char *command;
+    struct bg_status_node *next;
+};
+
+struct bg_status_queue {
+    struct bg_status_node *head;
+    struct bg_status_node *tail;
+};
 
 // TODO : Make a header file for functions declarations and structures
-pid_t foreground_pid = -1; // Used to store the pid of the foreground process
+pid_t foreground_pid = -2; // Used to store the pid of the foreground process
+struct bg_status_queue bg_status = {NULL, NULL};
 
 int main() {
 
@@ -273,6 +290,10 @@ void printCommandLine(struct line li) {
  * \param li (struct line) the line to execute
  * */
 void exeCommand(struct line const li) {
+    // We check if the user just pressed enter
+    if (li.n_cmds == 0) {
+        return;
+    }
     int const num_pipes = li.n_cmds - 1;
     int pipefds[2 * num_pipes];
     pid_t pid;
@@ -289,6 +310,7 @@ void exeCommand(struct line const li) {
         if(DEBUG) printf("We are in the %lu command\n", i);
         pid = fork();
         if (pid == 0) {
+            // Child process
             // Redirect input from previous command if not the first command
             if (i > 0) {
                 if (dup2(pipefds[(i - 1) * 2], 0) == -1) {
@@ -330,6 +352,26 @@ void exeCommand(struct line const li) {
         } else if (pid < 0) {
             perror("fork");
             exit(EXIT_FAILURE);
+        } else {
+            printf("parent process pid %d\n", getpid());
+        }
+
+        // If this is a background cmd we add it to the queue
+        if(li.background) {
+            printf("Treating a background command,with a pid of %d we add it to the queue\n", pid);
+            struct bg_status_node *node = malloc(sizeof(struct bg_status_node));
+            node->pid = pid;
+            node->status = 0;
+            node->finished = false;
+            node->command = strdup(li.cmds[i].args[0]);
+            node->next = NULL;
+            if(bg_status.tail) {
+                bg_status.tail->next = node;
+            } else {
+                bg_status.head = node;
+            }
+        } else {
+            printf("Treating foreground process of pid : %d\n", pid);
         }
     }
 
@@ -344,7 +386,13 @@ void exeCommand(struct line const li) {
             wait(&status);
         }
         // We print the exit status of the process
+        foreground_pid = pid;
         fprintf(stderr, "%sFG : Process %d exited with status %d%s\n",BLUE, pid, status, NC);
+
+        // We print the exit status of the background processes that have finished
+        printf("We print the finished background processes\n");
+        print_finished_bg_processes();
+
     }
 
 }
@@ -598,8 +646,8 @@ void sigint_handler() {
         if(kill(foreground_pid, SIGINT) == -1) {
             perror("kill");
         }
-        // We reset the value of foregound_pid to -1 to indicate that there is no more foreground process running
-        foreground_pid = -1;
+        // We reset the value of foregound_pid to -2 to indicate that there is no more foreground process running
+        foreground_pid = -2;
     } else {
         if (DEBUG) printf("%sNo foreground process to kill%s\n", RED, NC);
     }
@@ -646,16 +694,28 @@ void sigint_default(struct sigaction sigint_default) {
  * @param signum The signal number. Should always be SIGCHLD in this context.
  */
 void sigchld_handler(int const signum) {
-    if(DEBUG) printf("%sSIGCHLD signal received%s\n", RED, NC);
-    int status;
+    printf("%sSIGCHLD signal received%s\n", RED, NC);
+    // int status;
+    int status = 123456;
     pid_t pid;
-    printf("%d : %sCaught SIGCHLD signal code : %d%s\n", getpid(), GREEN, signum, NC);
+    pid_t queue_pid = -1234;
+    // printf("VALUE IS : %d\n", queue_pid);
+    if(DEBUG) printf("%d : %sCaught SIGCHLD signal code : %d%s\n", getpid(), GREEN, signum, NC);
 
     // We collect the zombie processes
     while((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        printf("value of pid is : %d\n", pid);
+        printf("value of foreground_pid is : %d\n", foreground_pid);
+        if(pid == foreground_pid) {
+            printf("This is the foreground process !");
+            continue;
+        }
+        printf("%d = waiting pid in sigchld handler\n", pid);
+        queue_pid = pid;
+        printf("Vaue of queue_pid is : %d\n", queue_pid);
         if (WIFEXITED(status)) {
             int const exit_status = WEXITSTATUS(status);
-            fprintf(stderr, "Background process %d exited with status %d\n", pid, exit_status);
+            if(DEBUG) fprintf(stderr, "Background process %d exited with status %d\n", pid, exit_status);
             if (exit_status == 127) {
                 if (DEBUG) printf("%sUnknown command !%s\n", RED, NC);
             } else if (exit_status != 0) {
@@ -666,5 +726,65 @@ void sigchld_handler(int const signum) {
         } else if (WIFSIGNALED(status)) {
             fprintf(stderr, "Process %d stopped by signal :%d\n", pid, WTERMSIG(status));
         }
+    }
+    printf("Out of waitpid\n");
+
+    // We detect if the pid is in the queue, to update the status
+    struct bg_status_node *current = bg_status.head;
+    while(current) {
+        if(current->pid == queue_pid) {
+            printf("PID %d found in the queue\n", queue_pid);
+            if(current->command != NULL) printf("Command of the process is : %s\n", current->command);
+            current->status = status;
+            current->finished = true;
+            break;
+        }
+        current = current->next;
+        if(current == NULL) printf("Pid : %d Not found, or queue empty\n", queue_pid);
+    }
+
+    if (foreground_pid == -2) {
+      printf("Foreground process not running, we can print the value of the "
+             "queue");
+        print_finished_bg_processes();
+
+
+    }
+    // print_queue(); // For debug
+}
+
+// Prints the commands in the queue that finished running, and their exit status
+// And we remove them from the queue
+void print_finished_bg_processes() {
+    struct bg_status_node *current = bg_status.head;
+    struct bg_status_node *prev = NULL;
+    if(current == NULL) {
+        printf("No background process in the queue\n");
+    }
+    while(current) {
+        if(current->finished) {
+            fprintf(stderr, "%sQUEUE -> BG : Process %d exited with status %d%s\n", BLUE, current->pid, current->status, NC);
+            if(prev) {
+                prev->next = current->next;
+                free(current);
+                current = prev->next;
+            } else {
+                bg_status.head = current->next;
+                free(current);
+                current = bg_status.head;
+            }
+        } else {
+            prev = current;
+            current = current->next;
+        }
+    }
+}
+
+// Prints the whole queue
+void print_queue() {
+    struct bg_status_node *current = bg_status.head;
+    while(current) {
+        printf("PID : %d\n", current->pid);
+        current = current->next;
     }
 }

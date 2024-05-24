@@ -1,0 +1,18 @@
+total 504
+-rw-r--r-- 1 keiris keiris   9073 Apr 11 11:27 cmdline.c
+-rw-r--r-- 1 keiris keiris   1206 Apr 11 11:27 cmdline.h
+-rw-r--r-- 1 keiris keiris  17592 May 24 20:02 cmdline.o
+-rwxr-xr-x 1 keiris keiris  17784 May 24 20:02 cmdline_test
+-rw-r--r-- 1 keiris keiris   3259 Apr 11 11:27 cmdline_test.c
+-rw-r--r-- 1 keiris keiris   9912 May 24 20:02 cmdline_test.o
+-rw-r--r-- 1 keiris keiris     28 May 23 18:16 export
+-rw-r--r-- 1 keiris keiris     10 May 24 18:27 file.txt
+-rwxr-xr-x 1 keiris keiris  30432 May 24 20:02 fish
+-rw-r--r-- 1 keiris keiris  25592 May 24 20:02 fish.c
+-rw-r--r-- 1 keiris keiris  24312 May 24 20:02 fish.o
+-rwxr-xr-x 1 keiris keiris  22216 May 24 20:02 libcmdline.so
+-rw-r--r-- 1 keiris keiris    627 May  2 16:03 Makefile
+-rw-r--r-- 1 keiris keiris 301956 Apr 15 11:41 projet-fish.pdf
+-rw-r--r-- 1 keiris keiris  10357 Apr 22 12:21 projet-fish.txt
+-rw-r--r-- 1 keiris keiris      6 Apr 15 11:37 README.md
+-rw-r--r-- 1 keiris keiris      0 May 24 20:03 wc

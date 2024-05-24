@@ -26,27 +26,32 @@
 
 #define YES_NO(i) ((i) ? "Y" : "N")
 
-void exeSimpleCommand(struct line li);
+void exeSimpleCommand(struct line li, struct sigaction* sigaction_action);
 void printCommandLine(struct line li);
 int detectInternCommand(struct cmd cmd);
 int exitFish(struct cmd command);
 void handle_redirections(char *input_file, char *output_file, int const append_mode);
-void sigint_handler(int const signum);
+// void sigint_handler(int const signum);
+struct sigaction sigint_handler();
+void sigint_default(struct sigaction sigint_default);
+
 void sigchld_handler(int const signum);
 
+// TODO : Make a header file for functions declarations and structures
 pid_t foreground_pid = -1; // Used to store the pid of the foreground process
 
-int main()
-{
+int main() {
+
     char buf[BUFLEN];
 
     struct line li;
     line_init(&li);
 
-    struct sigaction sa; // Declaration of signaction struct to handle the SIGACTION Signal
+    struct sigaction sigaction_action = sigint_handler();
 
     for (;;) {
         // We handle the signal for SIGCHLD
+        struct sigaction sa; // Declaration of signaction struct to handle the SIGACTION Signal
         sa.sa_handler = sigchld_handler;
         sigemptyset(&sa.sa_mask);
         sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
@@ -54,6 +59,7 @@ int main()
             perror("sigaction");
             exit(EXIT_FAILURE);
         }
+        /*
         sa.sa_handler = sigint_handler;
         // C
         // lear the sa_mask to avoid blocking any signals while handling SIGINT
@@ -66,6 +72,7 @@ int main()
             exit(EXIT_FAILURE);
         }
 
+        */
         char pwd[1024];
         getcwd(pwd, 1024);
         fprintf(stdout, "%s%s%s\n", GRAY, pwd, NC);
@@ -84,12 +91,12 @@ int main()
         // case where li is a simple command with or without arguments, but no pipes '|'
         if (li.n_cmds == 1 && li.cmds[0].n_args == 1) {
             if (DEBUG) printf("%sSimple command!%s\n", GREEN, NC);
-            exeSimpleCommand(li);
+            exeSimpleCommand(li, &sigaction_action);
         }
         else if (li.n_cmds == 1 && li.cmds[0].n_args > 1) {
             // Case where li is a simple command with arguments
             if (DEBUG) printf("%sSimple command WITH arguments!%s\n", GREEN, NC);
-            exeSimpleCommand(li);
+            exeSimpleCommand(li, &sigaction_action);
         }
 
         /* No entry redirection, output redirection TRUC MODE
@@ -115,24 +122,19 @@ int main()
     return 0;
 }
 
-/*
+/**
  * Detects if the command entered by the user is an intern command
- * \param struct line li
- *
- * \param int result | 0 for 'cd', 1 for 'exit' and -1 for the rest
+ * \param cmd the command to parse
+ * \return 0 for 'cd', 1 for 'exit' and -1 for the rest
  */
 int detectInternCommand(struct cmd cmd) {
     char *command = cmd.args[0];
     int const len = strlen(command);
-    if (DEBUG)
-        printf("LEN == %d\n", len);
-    if (len != 2 && len != 4)
-        return -1; // because len("cd") == 2 and len("exit") == 4
-    else if (strcmp("cd", command) == 0)
-        return 0;
-    else if (strcmp("exit", command) == 0)
-        return 1;
-    return -1;
+    if (DEBUG) printf("LEN == %d\n", len);
+    if (len != 2 && len != 4) return -1; // because len("cd") == 2 and len("exit") == 4
+    else if (strcmp("cd", command) == 0) return 0; // cd command
+    else if (strcmp("exit", command) == 0) return 1; // exit command
+    return -1; // Not an intern command
 }
 
 /**
@@ -141,8 +143,6 @@ int detectInternCommand(struct cmd cmd) {
  * \return -1 if execution failed, nothing if the exit works
  */
 int exitFish(struct cmd command) {
-    if (DEBUG)
-        printf("EXIT FISHHHH\n\n\n\n");
     long exitStatus = 0;
     char *endptr;
 
@@ -163,8 +163,7 @@ int exitFish(struct cmd command) {
     exit((int)exitStatus);
 }
 
-int cd(struct cmd command)
-{
+int cd(struct cmd command) {
     char *finalPath = NULL;
     char *first_arg = NULL;
     char first_char;
@@ -188,12 +187,6 @@ int cd(struct cmd command)
                 printf("// Only '~' was given");
                 finalPath = getenv("HOME");
             } else {
-                /*
-                finalPath = getenv("HOME");
-                strcat(finalPath, "/");
-                strcat(finalPath, &first_arg[1]);
-                */
-
                 finalPath = malloc(strlen(getenv("HOME")) + strlen(first_arg) + 1); // +1 for null char
                 if (finalPath == NULL) {
                     perror("Memory allocation error");
@@ -202,7 +195,7 @@ int cd(struct cmd command)
                 strcpy(finalPath, getenv("HOME"));
                 strcat(finalPath, &first_arg[1]);
 
-                printf("\n\n\n\nFINALPATH=%s\n\n\n\n", finalPath);
+                printf("\nFINALPATH=%s\n", finalPath);
             }
         } else {
             // If we are here then we have the correct number of args,
@@ -222,7 +215,7 @@ int cd(struct cmd command)
         return -1;
     }
 
-    if (DEBUG) printf("CD INTO %s\n\n\n", finalPath);
+    if (DEBUG) printf("CD INTO %s\n", finalPath);
     if (first_char == '~' && first_arg[1] != '\0') {
         // it means we have malloc'ed' finalPath so we must free it
         free(finalPath);
@@ -267,7 +260,7 @@ void printCommandLine(struct line li) {
  * Executes simple commands with and without arguments
  * \param li (struct line) the line to execute
  * */
-void exeSimpleCommand(struct line const li) {
+void exeSimpleCommand(struct line const li, struct sigaction* sigaction_action) {
     // We check if the command is an intern command
     int const internCommand = detectInternCommand(li.cmds[0]);
     if (internCommand == 0) {
@@ -338,6 +331,37 @@ void exeSimpleCommand(struct line const li) {
         if (DEBUG) printf("%sNO TRUC NOR APPEND MODE !%s\n\n\n", GRAY, NC);
     }
 
+    // If the command is not a background command, we execute the sigaction function
+    if(!li.background) {
+        printf("The value of sigaction_action is : %p\n", sigaction_action);
+        printf("The flag of sigaction_action is : %d\n", sigaction_action->sa_flags);
+        // We have set the value of sigaction_action to ignore the SIGINT signal
+        // But we are in a foreground process so we must set it to the default value
+        // This way it will kill foreground processes when we send a SIGINT signal
+        // But the background processes won't be affected
+
+        // sigint_default(sigaction_action);
+
+        /*
+        if(sigaction(SIGINT, sigaction_action, NULL) == -1) {
+            // We control the return value of sigaction
+            perror("sigaction");
+            exit(EXIT_FAILURE);
+        }
+        */
+
+        struct sigaction sigint_default;
+        sigemptyset(&sigint_default.sa_mask);
+        sigint_default.sa_flags = SA_RESTART;
+        sigint_default.sa_handler = SIG_DFL; // We set the handler to the default value
+
+        if(sigaction(SIGINT, &sigint_default, NULL) == -1) {
+            // We control the return value of sigaction
+            perror("sigaction");
+            exit(EXIT_FAILURE);
+        }
+    }
+
     // Creation of a child processus
     pid_t const pid = fork();
     // TODO : Handle the case where the process runs in the background ->
@@ -346,7 +370,6 @@ void exeSimpleCommand(struct line const li) {
     // The way the background process finishes will be displayed
     // Once the current foreground process finishes or when it finishes if no
     // foreground process is running
-
     if (pid < 0) {
         perror("Error while creating child process");
     } else if (pid == 0) {
@@ -363,7 +386,13 @@ void exeSimpleCommand(struct line const li) {
             }
         }
     } else {
+        // Parent process :
         int status;
+        if(li.background) {
+            // We don't wait for the child process to finish
+            printf("BG : The command %s is running in the background\n", li.cmds[0].args[0]);
+            return;
+        }
         // Parent process, we must wait for the child process to finish
         waitpid(pid, &status, 0);
 
@@ -443,35 +472,35 @@ void handle_redirections(char *input_file, char *output_file, int const append_m
 // TODO : On est pas obligé de renvoyer SIGINT a tous les process enfants,
 // Car quand on envoie CTRL+C dans fish, fish et tous ces enfants reçoivent le même signal SIGINT
 // Signal handler function
-/**
- * This function is called when the user presses Ctrl+C
- * We catch the signal SIGINT and we only send it to the foreground process
- * @param signum the signal number
- */
-void sigint_handler(int const signum) {
-    printf("%scaught sigint signal code : %d%s\n", GREEN, signum, NC);
 
-    /*
-    printf("The foreground process is : %d\n", foreground_pid);
-    if(li.background) {
-        printf("We don't kill background proecess !");
-    } else if (foreground_pid > 0) {
-        printf("We are killing the foreground process with pid : %d\n", foreground_pid);
-        if(kill(foreground_pid, SIGINT) == -1) {
-            perror("kill");
-        }
-        foreground_pid = -1;
-    } else {
-        if (DEBUG)
-            printf("%sNo foreground process to kill%s\n", RED, NC);
+// TODO : Create documentation
+struct sigaction sigint_handler() {
+    struct sigaction sigaction_action;
+    // We set sigaction_action to send the Ignore signal
+    sigemptyset(&sigaction_action.sa_mask); // We empty the mask
+    sigaction_action.sa_flags = SA_RESTART; // We set the flags to SA_RESTART
+    // The SA_RESTART flag is used to restart the system call interrupted by the signal
+    sigaction_action.sa_handler = SIG_IGN; // We set the handler to SIG_IGN
+    // The SIG_IGN flag is used to ignore the signal (IGN = Ignore)
+
+    // the sigaction function is used to change the action taken by a process on receipt of a specific signal
+    // Here We set tge action of the SIGINT signal
+    if(sigaction(SIGINT, &sigaction_action, NULL) == -1) {
+        // We control the return value of sigaction
+        perror("sigaction");
+        exit(EXIT_FAILURE);
     }
-    */
-    /*
-    line_reset(&li);
-    printCommandLine(li);
-    */
+
+    return sigaction_action;
 }
 
+// This functions returns a sigaction struct with the default values
+void sigint_default(struct sigaction sigint_default) {
+    sigemptyset(&sigint_default.sa_mask);
+    sigint_default.sa_flags = SA_RESTART;
+    sigint_default.sa_handler = SIG_DFL; // We set the handler to the default value
+    sigint_default.sa_restorer = NULL; // We set the restorer to NULL
+}
 /**
  * Handles the SIGCHLD signal sent by child processes when they terminate.
  * This function is a signal handler for the SIGCHLD signal. When a child process
@@ -490,7 +519,7 @@ void sigchld_handler(int const signum) {
     while((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         if (WIFEXITED(status)) {
             int const exit_status = WEXITSTATUS(status);
-            printf("Process %d exited with status %d\n", pid, exit_status);
+            printf("Background process %d exited with status %d\n", pid, exit_status);
             if (exit_status == 127) {
                 if (DEBUG)
                     printf("%sUnknown command !%s\n", RED, NC);

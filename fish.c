@@ -15,7 +15,7 @@
 
 #define _DEFAULT_SOURCE_
 #define BUFLEN 512
-#define DEBUG true
+#define DEBUG false
 
 // Colors definition
 #define RED "\x1b[31m"
@@ -26,7 +26,7 @@
 
 #define YES_NO(i) ((i) ? "Y" : "N")
 
-void exeSimpleCommand(struct line li);
+void exeCommand(struct line li);
 void printCommandLine(struct line li);
 int detectInternCommand(struct cmd cmd);
 int exitFish(struct cmd command);
@@ -100,13 +100,14 @@ int main() {
         // case where li is a simple command with or without arguments, but no pipes '|'
         if (li.n_cmds == 1 && li.cmds[0].n_args == 1) {
             if (DEBUG) printf("%sSimple command!%s\n", GREEN, NC);
-            exeSimpleCommand(li);
+            exeCommand(li);
         }
         else if (li.n_cmds == 1 && li.cmds[0].n_args > 1) {
             // Case where li is a simple command with arguments
             if (DEBUG) printf("%sSimple command WITH arguments!%s\n", GREEN, NC);
-            exeSimpleCommand(li);
+            exeCommand(li);
         }
+        else exeCommand(li);
 
         /* No entry redirection, output redirection TRUC MODE
         char *args[] = {"ls", NULL};
@@ -265,11 +266,102 @@ void printCommandLine(struct line li) {
     fprintf(stderr, "\tBackground: %s\n", YES_NO(li.background));
 }
 
+
 /**
- * Executes simple commands with and without arguments
+ * Executes the command given in the struct line
+ * Works with simple commands with and without arg, and commands with pipes
  * \param li (struct line) the line to execute
  * */
-void exeSimpleCommand(struct line const li) {
+void exeCommand(struct line const li) {
+    int const num_pipes = li.n_cmds - 1;
+    int pipefds[2 * num_pipes];
+    pid_t pid;
+    int status;
+
+    // Create pipes
+    for (int i = 0; i < num_pipes; i++) {
+        if (pipe(pipefds + i * 2) == -1) {
+            perror("pipe");
+            exit(EXIT_FAILURE);
+        }
+    }
+    for (size_t i = 0; i < li.n_cmds; i++) {
+        if(DEBUG) printf("We are in the %lu command\n", i);
+        pid = fork();
+        if (pid == 0) {
+            // Redirect input from previous command if not the first command
+            if (i > 0) {
+                if (dup2(pipefds[(i - 1) * 2], 0) == -1) {
+                    perror("dup2 input");
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+            // Redirect output to next command if not the last command
+            if (i < li.n_cmds - 1) {
+                if (dup2(pipefds[i * 2 + 1], 1) == -1) {
+                    perror("dup2 output");
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+            // Close all pipe fds in child process
+            for (int j = 0; j < 2 * num_pipes; j++) {
+                close(pipefds[j]);
+            }
+
+            // Handle redirections for the first and last commands
+            if (i == 0 && li.file_input) {
+                freopen(li.file_input, "r", stdin);
+            }
+            if (i == li.n_cmds - 1 && li.file_output) {
+                if (li.file_output_append) {
+                    freopen(li.file_output, "a", stdout);
+                } else {
+                    freopen(li.file_output, "w", stdout);
+                }
+            }
+
+            // Execute command
+            if (execvp(li.cmds[i].args[0], li.cmds[i].args) == -1) {
+                perror("execvp");
+                exit(EXIT_FAILURE);
+            }
+        } else if (pid < 0) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Parent process closes all pipe fds
+    for (int i = 0; i < 2 * num_pipes; i++) {
+        close(pipefds[i]);
+    }
+
+    // Wait for child processes to finish if not a background job
+    if (!li.background) {
+        for (size_t i = 0; i < li.n_cmds; i++) {
+            wait(&status);
+        }
+        // We print the exit status of the process
+        fprintf(stderr, "%sFG : Process %d exited with status %d%s\n",BLUE, pid, status, NC);
+    }
+
+}
+
+
+
+
+
+
+
+
+/**
+ * Executes commands with and without arguments
+ * \param li (struct line) the line to execute
+ * */
+/*
+void exeCommand(struct line const li) {
     // We check if the command is an intern command
     int const internCommand = detectInternCommand(li.cmds[0]);
     if (internCommand == 0) {
@@ -355,6 +447,7 @@ void exeSimpleCommand(struct line const li) {
 
         // sigint_default(sigaction_action);
 
+        */
         /*
         if(sigaction(SIGINT, sigaction_action, NULL) == -1) {
             // We control the return value of sigaction
@@ -374,7 +467,9 @@ void exeSimpleCommand(struct line const li) {
             perror("sigaction");
             exit(EXIT_FAILURE);
         }
-        */
+    //         */
+
+/*
     }
 
     // Creation of a child processus
@@ -439,6 +534,7 @@ void exeSimpleCommand(struct line const li) {
     }
 }
 
+*/
 /*
  * Handles redirection of standard I/O
  * @param char* input_file the name of the input file
@@ -507,10 +603,7 @@ void sigint_handler() {
     } else {
         if (DEBUG) printf("%sNo foreground process to kill%s\n", RED, NC);
     }
-    /*
-    line_reset(&li);
-    printCommandLine(li);
-    */
+    // line_reset(&li);
 }
 
 
@@ -538,7 +631,6 @@ struct sigaction sigint_handler() {
 }
 */
 
-// This functions returns a sigaction struct with the default values
 void sigint_default(struct sigaction sigint_default) {
     sigemptyset(&sigint_default.sa_mask);
     sigint_default.sa_flags = SA_RESTART;
@@ -563,16 +655,13 @@ void sigchld_handler(int const signum) {
     while((pid = waitpid(-1, &status, WNOHANG)) > 0) {
         if (WIFEXITED(status)) {
             int const exit_status = WEXITSTATUS(status);
-            printf("Background process %d exited with status %d\n", pid, exit_status);
+            fprintf(stderr, "Background process %d exited with status %d\n", pid, exit_status);
             if (exit_status == 127) {
-                if (DEBUG)
-                    printf("%sUnknown command !%s\n", RED, NC);
+                if (DEBUG) printf("%sUnknown command !%s\n", RED, NC);
             } else if (exit_status != 0) {
-                if (DEBUG)
-                    fprintf(stderr, "%sCould not run command !%s\n", RED, NC);
+                if (DEBUG) fprintf(stderr, "%sCould not run command !%s\n", RED, NC);
             } else {
-                if (DEBUG)
-                    printf("%sSuccess !%s\n", GREEN, NC);
+                if (DEBUG) printf("%sSuccess !%s\n", GREEN, NC);
             }
         } else if (WIFSIGNALED(status)) {
             fprintf(stderr, "Process %d stopped by signal :%d\n", pid, WTERMSIG(status));

@@ -1,62 +1,11 @@
 #define _POSIX_C_SOURCE 199309L
 #define _XOPEN_SOURCE 700
-
-#include "cmdline.h"
-
-#include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
+// These defined are used for the sigaction struct
 
 #define _DEFAULT_SOURCE_
-#define BUFLEN 512
-#define DEBUG false
 
-// Colors definition
-#define RED "\x1b[31m"
-#define GREEN "\x1b[32m"
-#define BLUE "\x1b[34m"
-#define GRAY "\x1b[90m"
-#define NC "\x1b[0m"
+#include "fish.h"
 
-#define YES_NO(i) ((i) ? "Y" : "N")
-
-void exeCommand(struct line li);
-void printCommandLine(struct line li);
-int detectInternCommand(struct cmd cmd);
-int exitFish(struct cmd command);
-void handle_redirections(char *input_file, char *output_file, int const append_mode);
-// void sigint_handler(int const signum);
-void sigint_handler();
-
-void sigchld_handler(int const signum);
-void print_finished_bg_processes();
-int exeInternCommand(struct line const li);
-
-void sigint_ignore();
-void sigint_default();
-
-void print_queue();
-
-struct bg_status_node {
-    pid_t pid;
-    int status;
-    bool finished;
-    char *command;
-    struct bg_status_node *next;
-};
-
-struct bg_status_queue {
-    struct bg_status_node *head;
-    struct bg_status_node *tail;
-};
-
-// TODO : Make a header file for functions declarations and structures
 pid_t foreground_pid = -2; // Used to store the pid of the foreground process
 size_t nbBgProcesses = 0;
 struct bg_status_queue bg_status = {NULL, NULL};
@@ -103,6 +52,279 @@ int main() {
 }
 
 /**
+ * Executes the command given in the struct line
+ * Works with simple commands with and without arg, and commands with pipes
+ * \param li (struct line) the line to execute
+ * */
+void exeCommand(struct line const li) {
+    // We check if the user just pressed enter
+    if (li.n_cmds == 0) {
+        return;
+    }
+    int const num_pipes = li.n_cmds - 1;
+    int pipefds[2 * num_pipes];
+    pid_t pid;
+    int status;
+
+    // We look if there is only a command, because it can be an intern command
+    if (li.n_cmds == 1) {
+        if(exeInternCommand(li) == 0) {
+            // We have executed an intern command, we return
+            return;
+        }
+    }
+
+    if(!li.background) {
+        // We de-ignore the SIGINT signal for the foreground process
+        sigint_default();
+    }
+
+    // Create pipes
+    for (int i = 0; i < num_pipes; i++) {
+        if (pipe(pipefds + i * 2) == -1) {
+            perror("pipe");
+            exit(EXIT_FAILURE);
+        }
+    }
+    for (size_t i = 0; i < li.n_cmds; i++) {
+        if(DEBUG) printf("We are in the %lu command\n", i);
+        pid = fork();
+        if (pid == 0) {
+            // Child process
+            // Redirect input from previous command if not the first command
+            if (i > 0) {
+                if (dup2(pipefds[(i - 1) * 2], 0) == -1) {
+                    perror("dup2 input");
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+            // Redirect output to next command if not the last command
+            if (i < li.n_cmds - 1) {
+                if (dup2(pipefds[i * 2 + 1], 1) == -1) {
+                    perror("dup2 output");
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+            // Close all pipe fds in child process
+            for (int j = 0; j < 2 * num_pipes; j++) {
+                close(pipefds[j]);
+            }
+
+            // Handle redirections for the first and last commands
+            if (i == 0 && li.file_input) {
+                // Input redirection
+                freopen(li.file_input, "r", stdin);
+            }
+            if (i == li.n_cmds - 1 && li.file_output) {
+                if (li.file_output_append) {
+                    // Append mode
+                    freopen(li.file_output, "a", stdout);
+                } else {
+                    freopen(li.file_output, "w", stdout);
+                }
+            }
+
+            // Execute command
+            if (execvp(li.cmds[i].args[0], li.cmds[i].args) == -1) {
+                perror("execvp");
+                exit(EXIT_FAILURE);
+            }
+        } else if (pid < 0) {
+            perror("fork");
+            exit(EXIT_FAILURE);
+        } else {
+            if(DEBUG) printf("parent process pid %d\n", getpid());
+        }
+
+        sigint_ignore();
+        // If this is a background cmd we add it to the queue
+        if(li.background) {
+            printf("Treating a background command,with a pid of %d we add it to the queue\n", pid);
+            struct bg_status_node *node = malloc(sizeof(struct bg_status_node));
+            node->pid = pid;
+            node->status = 0;
+            node->finished = false;
+            node->next = NULL;
+            if(bg_status.tail) {
+                bg_status.tail->next = node;
+            } else {
+                bg_status.head = node;
+            }
+            nbBgProcesses++;
+        } else {
+            printf("Treating foreground process of pid : %d\n", pid);
+        }
+    }
+
+    // Parent process closes all pipe fds
+    for (int i = 0; i < 2 * num_pipes; i++) {
+        close(pipefds[i]);
+    }
+
+    // Wait for child processes to finish if not a background job
+    if (!li.background) {
+        for (size_t i = 0; i < li.n_cmds; i++) {
+            wait(&status);
+        }
+        // We print the exit status of the process
+        foreground_pid = pid;
+        fprintf(stderr, "%sFG : Process %d exited with status %d%s\n",BLUE, pid, status, NC);
+
+        // We print the exit status of the background processes that have finished
+        printf("We print the finished background processes\n");
+        print_finished_bg_processes();
+    }
+}
+
+/* ----------------- Signal handlers ----------------- */
+
+/**
+ * Sets the SIGINT signal to be ignored when received
+ */
+void sigint_ignore() {
+    struct sigaction sa;
+
+    // We set the handler to ignore the signal
+    sigemptyset(&sa.sa_mask); // We empty the mask
+    sa.sa_handler = SIG_IGN; // We set the handler to SIG_IGN
+    sa.sa_flags = 0; // We set the flags to 0
+
+    if(sigaction(SIGINT, &sa, NULL) == -1) {
+        // We control the return value of sigaction
+        perror("sigaction");
+    }
+}
+
+/**
+ * We set the SIGINT signal to be handled by the default handler
+ */
+void sigint_default() {
+    struct sigaction sa;
+
+    // Clear the sigaction structure
+    sigemptyset(&sa.sa_mask);
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("Failed to reset SIGINT to default");
+    }
+}
+
+/**
+ * Handles the SIGCHLD signal
+ * \param signum the signal number (should be SIGCHLD)
+ */
+void sigchld_handler(int signum) {
+    if(DEBUG) printf("SIGCHLD HANDLER %d\n", signum);
+    int status;
+    pid_t pid;
+
+    struct bg_status_node *current = bg_status.head;
+    while(current) {
+        pid = current->pid;
+        if (pid != -1 && waitpid(pid, &status, WNOHANG) > 0) {
+            if (WIFEXITED(status)) {
+                fprintf(stderr,"%sBG : Command `%d` exited with status %d%s\n", BLUE, pid, WEXITSTATUS(status),NC);
+                current->finished = true;
+            }
+            else if (WIFSIGNALED(status)) {
+                fprintf(stderr, "%sBG : Command `%d` killed by signal %d%s\n", BLUE, pid, WTERMSIG(status), NC);
+                current->finished = true;
+            }
+        }
+        current = current->next;
+    }
+
+    if(foreground_pid == -1) {
+        // If there is no foreground process running, we can print the background processes
+        print_finished_bg_processes();
+    }
+}
+
+/**
+ * Prints the finished background processes
+ */
+void print_finished_bg_processes() {
+    struct bg_status_node *current = bg_status.head;
+    struct bg_status_node *prev = NULL;
+    if(current == NULL) {
+        if(DEBUG) printf("No background process in the queue\n");
+    }
+    while(current) {
+        if(current->pid != 1 && current->finished) {
+            if(DEBUG) fprintf(stderr, "%sBG : Process %d exited with status %d%s\n", BLUE, current->pid, current->status, NC);
+            if(prev) {
+                prev->next = current->next;
+                free(current);
+                current = prev->next;
+            } else {
+                bg_status.head = current->next;
+                free(current);
+                current = bg_status.head;
+            }
+        } else {
+            prev = current;
+            current = current->next;
+        }
+    }
+}
+
+/**
+ * Prints the queue of background processes
+ * Used for debug purposes
+ */
+void print_queue() {
+    struct bg_status_node *current = bg_status.head;
+    while(current) {
+        printf("PID : %d\n", current->pid);
+        current = current->next;
+    }
+}
+
+/**
+ * Frees the queue of background processes
+ * Used when we exit the program
+ */
+void free_queue() {
+    struct bg_status_node *current = bg_status.head;
+    struct bg_status_node *next = NULL;
+    while(current) {
+        next = current->next;
+        free(current->command);
+        free(current);
+        current = next;
+    }
+}
+
+/* ----------------- End Signal handlers ------------- */
+
+/* ----------------- Intern commands ----------------- */
+
+/**
+ * Executes intern commands 'cd' and 'exit'
+ * Or nothing if the command is not an intern command
+ * \param li the line to execute
+ * */
+int exeInternCommand(struct line const li) {
+    const int internCommand = detectInternCommand(li.cmds[0]);
+    if (internCommand == 0) {
+        // We have a 'cd' command
+        if (DEBUG) printf("CD\n");
+        cd(li.cmds[0]);
+        return 0;
+    } else if (internCommand == 1) {
+        // We have a 'exit' command
+        printf("%sexiting fish...%s\n", RED, NC);
+        exitFish(li.cmds[0]);
+        return 0;
+    }
+    return -1;
+}
+
+/**
  * Detects if the command entered by the user is an intern command
  * \param cmd the command to parse
  * \return 0 for 'cd', 1 for 'exit' and -1 for the rest
@@ -138,6 +360,10 @@ int exitFish(struct cmd command) {
     if (endptr == command.args[1] || *endptr != '\0') {
         fprintf(stderr, "%sexit: Invalid argument \"%s\", must be a number%s\n", RED, command.args[1], NC);
     }
+
+    // We free the background queue
+    free_queue();
+
     // We exit with the code given by the user
     exit((int)exitStatus);
 }
@@ -203,9 +429,12 @@ int cd(struct cmd command) {
     if (first_char == '~' && first_arg[1] != '\0') {
         // it means we have malloc'ed' finalPath so we must free it
         free(finalPath);
+        return 0;
     }
+    if(finalPath != NULL) free(finalPath);
     return 0;
 }
+
 /*
  * Prints the whole struct line
  * the #define DEBUG needs to be set to true
@@ -240,320 +469,10 @@ void printCommandLine(struct line li) {
     fprintf(stderr, "\tBackground: %s\n", YES_NO(li.background));
 }
 
+/* ----------------- End Intern commands ------------- */
 
-/**
- * Executes the command given in the struct line
- * Works with simple commands with and without arg, and commands with pipes
- * \param li (struct line) the line to execute
- * */
-void exeCommand(struct line const li) {
-    // We check if the user just pressed enter
-    if (li.n_cmds == 0) {
-        return;
-    }
-    int const num_pipes = li.n_cmds - 1;
-    int pipefds[2 * num_pipes];
-    pid_t pid;
-    int status;
+/* ---------------- Redirections (deprecated) -------- */
 
-    // We look if there is only a command, because it can be an intern command
-    if (li.n_cmds == 1) {
-        if(exeInternCommand(li) == 0) {
-            // We have executed an intern command, we return
-            return;
-        }
-    }
-
-    if(!li.background) {
-        // We de-ignore the SIGINT signal for the foreground process
-        sigint_default();
-    }
-
-    // Create pipes
-    for (int i = 0; i < num_pipes; i++) {
-        if (pipe(pipefds + i * 2) == -1) {
-            perror("pipe");
-            exit(EXIT_FAILURE);
-        }
-    }
-    for (size_t i = 0; i < li.n_cmds; i++) {
-        if(DEBUG) printf("We are in the %lu command\n", i);
-        pid = fork();
-        if (pid == 0) {
-            // Child process
-            // Redirect input from previous command if not the first command
-            if (i > 0) {
-                if (dup2(pipefds[(i - 1) * 2], 0) == -1) {
-                    perror("dup2 input");
-                    exit(EXIT_FAILURE);
-                }
-            }
-
-            // Redirect output to next command if not the last command
-            if (i < li.n_cmds - 1) {
-                if (dup2(pipefds[i * 2 + 1], 1) == -1) {
-                    perror("dup2 output");
-                    exit(EXIT_FAILURE);
-                }
-            }
-
-            // Close all pipe fds in child process
-            for (int j = 0; j < 2 * num_pipes; j++) {
-                close(pipefds[j]);
-            }
-
-            // Handle redirections for the first and last commands
-            if (i == 0 && li.file_input) {
-                freopen(li.file_input, "r", stdin);
-            }
-            if (i == li.n_cmds - 1 && li.file_output) {
-                if (li.file_output_append) {
-                    freopen(li.file_output, "a", stdout);
-                } else {
-                    freopen(li.file_output, "w", stdout);
-                }
-            }
-
-            // Execute command
-            if (execvp(li.cmds[i].args[0], li.cmds[i].args) == -1) {
-                perror("execvp");
-                exit(EXIT_FAILURE);
-            }
-        } else if (pid < 0) {
-            perror("fork");
-            exit(EXIT_FAILURE);
-        } else {
-            if(DEBUG) printf("parent process pid %d\n", getpid());
-        }
-
-        sigint_ignore();
-        // If this is a background cmd we add it to the queue
-        if(li.background) {
-            printf("Treating a background command,with a pid of %d we add it to the queue\n", pid);
-            struct bg_status_node *node = malloc(sizeof(struct bg_status_node));
-            node->pid = pid;
-            node->status = 0;
-            node->finished = false;
-            node->command = strdup(li.cmds[i].args[0]);
-            node->next = NULL;
-            if(bg_status.tail) {
-                bg_status.tail->next = node;
-            } else {
-                bg_status.head = node;
-            }
-            nbBgProcesses++;
-        } else {
-            printf("Treating foreground process of pid : %d\n", pid);
-        }
-    }
-
-    // Parent process closes all pipe fds
-    for (int i = 0; i < 2 * num_pipes; i++) {
-        close(pipefds[i]);
-    }
-
-    // Wait for child processes to finish if not a background job
-    if (!li.background) {
-        for (size_t i = 0; i < li.n_cmds; i++) {
-            wait(&status);
-        }
-        // We print the exit status of the process
-        foreground_pid = pid;
-        fprintf(stderr, "%sFG : Process %d exited with status %d%s\n",BLUE, pid, status, NC);
-
-        // We print the exit status of the background processes that have finished
-        printf("We print the finished background processes\n");
-        print_finished_bg_processes();
-    }
-
-}
-
-
-
-
-
-
-
-
-/**
- * Executes commands with and without arguments
- * \param li (struct line) the line to execute
- * */
-/*
-void exeCommand(struct line const li) {
-    // We check if the command is an intern command
-    int const internCommand = detectInternCommand(li.cmds[0]);
-    if (internCommand == 0) {
-        if (DEBUG) printf("CD\n");
-        cd(li.cmds[0]);
-        return;
-    } else if (internCommand == 1) {
-        printf("%sexiting fish...%s\n", RED, NC);
-        exitFish(li.cmds[0]);
-    } else if (DEBUG) printf("NO CD NO EXIT\n");
-    if (DEBUG) printf("\n\n\n%sFILE INPUT = '%s', FILE OUTPUT = '%s'%s\n\n\n", RED, li.file_input, li.file_output, NC);
-
-    // We detect if the command has a redirection of input
-    int inRedir, outRedir, append, trunc = 0;
-    if (li.file_input != NULL) {
-        if (DEBUG) printf("TREATING INPUT\n");
-        inRedir = 1;
-        if (DEBUG) printf("REDIRECTION INPUT\n\n");
-    } else {
-        if (DEBUG) printf("NO INPUT REDIRECTION\n\n");
-    }
-
-    // We detect if the command has a redirection of output
-    if (li.file_output != NULL) {
-        if (DEBUG) printf("TREATING OUTPUT\n");
-        outRedir = 1;
-        // We treat the append or trunc
-        if (li.file_output_append) {
-            if (DEBUG) printf("APPEND\n\n");
-            append = 1;
-        } else {
-            if (DEBUG) printf("TRUNC\n\n");
-            trunc = 1;
-        }
-        if (DEBUG) printf("REDIRECTION OUTPUT\n\n");
-    } else {
-        if (DEBUG) printf("NO OUTPUT REDIRECTION\n\n");
-    }
-
-    // We set the input and output to standard I/O
-    char *input_file = NULL;
-    char *output_file = NULL;
-    // We redirect the I/O if needed
-    if (inRedir == 1) {
-        input_file = li.file_output;
-    }
-    if (outRedir == 1) {
-        output_file = li.file_output;
-    }
-
-    // If we come across a 'background' command, if the input is not redirected
-    // We set the input to /dev/null
-    if (li.background == true && inRedir == 0) {
-        if(DEBUG) printf("Background command with no input redirection, input = /dev/null\n");
-        input_file = "/dev/null";
-    }
-
-    int saved_stdout = dup(STDOUT_FILENO); // saving the current stdout
-    // We handle the redirections
-    if (trunc == 1) {
-        if (DEBUG) printf("%sTRUNC MODE ACTIVATED !%s\n\n\n", GRAY, NC);
-        handle_redirections(input_file, output_file, 0); // trunc mode
-    } else if (append == 1) {
-        if (DEBUG) printf("%sAPPEND MODE ACTIVATED !%s\n\n\n", GRAY, NC);
-        handle_redirections(input_file, output_file, 1); // append mode
-    }
-    else {
-        if (DEBUG) printf("%sNO TRUC NOR APPEND MODE !%s\n\n\n", GRAY, NC);
-    }
-
-    // If the command is not a background command, we execute the sigaction function
-    if(!li.background) {
-        // We store the value of the pid of the foreground process to kill it when we receive a SIGINT signal
-        foreground_pid = getpid();
-
-        // printf("The value of sigaction_action is : %p\n", sigaction_action);
-        // printf("The flag of sigaction_action is : %d\n", sigaction_action->sa_flags);
-
-        // We have set the value of sigaction_action to ignore the SIGINT signal
-        // But we are in a foreground process so we must set it to the default value
-        // This way it will kill foreground processes when we send a SIGINT signal
-        // But the background processes won't be affected
-
-        // sigint_default(sigaction_action);
-
-        */
-        /*
-        if(sigaction(SIGINT, sigaction_action, NULL) == -1) {
-            // We control the return value of sigaction
-            perror("sigaction");
-            exit(EXIT_FAILURE);
-        }
-        */
-
-        /*
-        struct sigaction sigint_default;
-        sigemptyset(&sigint_default.sa_mask);
-        sigint_default.sa_flags = SA_RESTART;
-        sigint_default.sa_handler = SIG_DFL; // We set the handler to the default value
-
-        if(sigaction(SIGINT, &sigint_default, NULL) == -1) {
-            // We control the return value of sigaction
-            perror("sigaction");
-            exit(EXIT_FAILURE);
-        }
-    //         */
-
-/*
-    }
-
-    // Creation of a child processus
-    pid_t const pid = fork();
-    // TODO : Handle the case where the process runs in the background ->
-    // If a process runs in the background, we must not wait for it to finish
-    // We loop the for(;;) loop and display the prompt again
-    // The way the background process finishes will be displayed
-    // Once the current foreground process finishes or when it finishes if no
-    // foreground process is running
-    if (pid < 0) {
-        perror("Error while creating child process");
-    } else if (pid == 0) {
-        // This is the child process
-        if (execvp(li.cmds[0].args[0], li.cmds[0].args) == -1) {
-
-            if (errno == ENOENT) {
-                // The command was not found
-                fprintf(stderr, "%sCommand not found%s\n", RED, NC);
-            } else {
-                // The command was found but there was an error while executing it
-                perror("Error while executing command\n");
-                exit(-1);
-            }
-        }
-    } else {
-        // Parent process :
-        int status;
-        if(li.background) {
-            // We don't wait for the child process to finish
-            printf("BG : The command %s is running in the background\n", li.cmds[0].args[0]);
-            return;
-        }
-        // Parent process, we must wait for the child process to finish
-        waitpid(pid, &status, 0);
-
-        dup2(saved_stdout, STDOUT_FILENO); // Restore standard output to last state
-        close(saved_stdout);
-
-        // We check the exit status of the process child
-        if (WIFEXITED(status)) {
-            const int exit_status = WEXITSTATUS(status);
-            if (exit_status == 127) {
-                if (DEBUG) printf("%sUnknown command !%s\n", RED, NC);
-            } else if (exit_status != 0) {
-                if (DEBUG) fprintf(stderr, "%sCould not run command !%s\n", RED, NC);
-            } else {
-                if (DEBUG) printf("%sSuccess !%s\n", GREEN, NC);
-
-                // We determine if the process was running in the BG of FG for the display
-                char *state;
-                if (li.background == true) {
-                    state = "BG";
-                } else {
-                    state = "FG";
-                }
-                fprintf(stderr, "%s%s : %d exited, status = %d%s\n", BLUE, state, pid, status, NC);
-            }
-        } else if (WIFSIGNALED(status)) {
-            fprintf(stderr, "Child process stopped by signal :%d\n", WTERMSIG(status));
-        }
-    }
-}
-
-*/
 /*
  * Handles redirection of standard I/O
  * @param char* input_file the name of the input file
@@ -598,239 +517,4 @@ void handle_redirections(char *input_file, char *output_file, int const append_m
         close(output_fd);
     }
 }
-
-// TODO : On est pas obligé de renvoyer SIGINT a tous les process enfants,
-// Car quand on envoie CTRL+C dans fish, fish et tous ces enfants reçoivent le même signal SIGINT
-// Signal handler function
-
-
-/**
- * This function is called when the user presses Ctrl+C
- * We catch the signal SIGINT and we only send it to the foreground process
- */
-void sigint_handler() {
-
-    printf("The foreground process is : %d\n", foreground_pid);
-    if (foreground_pid > 0) {
-        // We have a foreground process running we kill it
-        printf("We are killing the foreground process with pid : %d\n", foreground_pid);
-        if(kill(foreground_pid, SIGINT) == -1) {
-            perror("kill");
-        }
-        // We reset the value of foregound_pid to -2 to indicate that there is no more foreground process running
-        foreground_pid = -2;
-    } else {
-        if (DEBUG) printf("%sNo foreground process to kill%s\n", RED, NC);
-    }
-    // line_reset(&li);
-}
-
-
-
-/*
-// TODO : Create documentation
-struct sigaction sigint_handler() {
-    struct sigaction sigaction_action;
-    // We set sigaction_action to send the Ignore signal
-    sigemptyset(&sigaction_action.sa_mask); // We empty the mask
-    sigaction_action.sa_flags = SA_RESTART; // We set the flags to SA_RESTART
-    // The SA_RESTART flag is used to restart the system call interrupted by the signal
-    sigaction_action.sa_handler = SIG_IGN; // We set the handler to SIG_IGN
-    // The SIG_IGN flag is used to ignore the signal (IGN = Ignore)
-
-    // the sigaction function is used to change the action taken by a process on receipt of a specific signal
-    // Here We set tge action of the SIGINT signal
-    if(sigaction(SIGINT, &sigaction_action, NULL) == -1) {
-        // We control the return value of sigaction
-        perror("sigaction");
-        exit(EXIT_FAILURE);
-    }
-
-    return sigaction_action;
-}
-*/
-
-/**
- * Handles the SIGCHLD signal sent by child processes when they terminate.
- * This function is a signal handler for the SIGCHLD signal. When a child process
- * terminates, it sends a SIGCHLD signal to the parent process. This function catches that signal,
- * and properly handles the termination of the child process, including collecting its exit status.
- *
- * @param signum The signal number. Should always be SIGCHLD in this context.
- */
-/*
-void sigchld_handler(int const signum) {
-    printf("%sSIGCHLD signal received%s\n", RED, NC);
-    // int status;
-    int status = 123456;
-    pid_t pid;
-    pid_t queue_pid = -1234;
-    // printf("VALUE IS : %d\n", queue_pid);
-    if(DEBUG) printf("%d : %sCaught SIGCHLD signal code : %d%s\n", getpid(), GREEN, signum, NC);
-
-    // We collect the zombie processes
-    while((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        printf("value of pid is : %d\n", pid);
-        printf("value of foreground_pid is : %d\n", foreground_pid);
-        if(pid == foreground_pid) {
-            printf("This is the foreground process !");
-            continue;
-        }
-        printf("%d = waiting pid in sigchld handler\n", pid);
-        queue_pid = pid;
-        printf("Vaue of queue_pid is : %d\n", queue_pid);
-        if (WIFEXITED(status)) {
-            int const exit_status = WEXITSTATUS(status);
-            if(DEBUG) fprintf(stderr, "Background process %d exited with status %d\n", pid, exit_status);
-            if (exit_status == 127) {
-                if (DEBUG) printf("%sUnknown command !%s\n", RED, NC);
-            } else if (exit_status != 0) {
-                if (DEBUG) fprintf(stderr, "%sCould not run command !%s\n", RED, NC);
-            } else {
-                if (DEBUG) printf("%sSuccess !%s\n", GREEN, NC);
-            }
-        } else if (WIFSIGNALED(status)) {
-            fprintf(stderr, "Process %d stopped by signal :%d\n", pid, WTERMSIG(status));
-        }
-    }
-    printf("Out of waitpid\n");
-
-    // We detect if the pid is in the queue, to update the status
-    struct bg_status_node *current = bg_status.head;
-    while(current) {
-        if(current->pid == queue_pid) {
-            printf("PID %d found in the queue\n", queue_pid);
-            if(current->command != NULL) printf("Command of the process is : %s\n", current->command);
-            current->status = status;
-            current->finished = true;
-            break;
-        }
-        current = current->next;
-        if(current == NULL) printf("Pid : %d Not found, or queue empty\n", queue_pid);
-    }
-
-    if (foreground_pid == -2) {
-      printf("Foreground process not running, we can print the value of the "
-             "queue");
-        print_finished_bg_processes();
-
-
-    }
-    // print_queue(); // For debug
-}
-*/
-void sigchld_handler(int signum) {
-    if(DEBUG) printf("SIGCHLD HANDLER %d\n", signum);
-    int status;
-    pid_t pid;
-
-    struct bg_status_node *current = bg_status.head;
-    while(current) {
-        pid = current->pid;
-        if (pid != -1 && waitpid(pid, &status, WNOHANG) > 0) {
-            if (WIFEXITED(status)) {
-                if(DEBUG) fprintf(stderr,"%sBG : Command `%d` exited with status %d%s\n", BLUE, pid, WEXITSTATUS(status),NC);
-                current->finished = true;
-            }
-            else if (WIFSIGNALED(status)) {
-                // fprintf(stderr, "%sBG : Command `%d` killed by signal %d%s\n", BLUE, pid, WTERMSIG(status), NC);
-                current->finished = true;
-            }
-        }
-        current = current->next;
-    }
-}
-
-
-// Prints the commands in the queue that finished running, and their exit status
-// And we remove them from the queue
-void print_finished_bg_processes() {
-    struct bg_status_node *current = bg_status.head;
-    struct bg_status_node *prev = NULL;
-    printf("pritin\n");
-    if(current == NULL) {
-        if(DEBUG) printf("No background process in the queue\n");
-    }
-    while(current) {
-        printf("WA");
-        if(current->pid != 1 && current->finished) {
-            fprintf(stderr, "%sQUEUE -> BG : Process %d exited with status %d%s\n", BLUE, current->pid, current->status, NC);
-            printf("NO");
-            if(prev) {
-                prev->next = current->next;
-                free(current);
-                current = prev->next;
-            } else {
-                bg_status.head = current->next;
-                free(current);
-                current = bg_status.head;
-            }
-        } else {
-            prev = current;
-            current = current->next;
-        }
-    }
-}
-
-// Prints the whole queue
-void print_queue() {
-    struct bg_status_node *current = bg_status.head;
-    while(current) {
-        printf("PID : %d\n", current->pid);
-        current = current->next;
-    }
-}
-
-/**
- * Executes intern commands 'cd' and 'exit'
- * Or nothing if the command is not an intern command
- * \param li the line to execute
- * */
-int exeInternCommand(struct line const li) {
-    const int internCommand = detectInternCommand(li.cmds[0]);
-    if (internCommand == 0) {
-        // We have a 'cd' command
-        if (DEBUG) printf("CD\n");
-        cd(li.cmds[0]);
-        return 0;
-    } else if (internCommand == 1) {
-        // We have a 'exit' command
-        printf("%sexiting fish...%s\n", RED, NC);
-        exitFish(li.cmds[0]);
-        return 0;
-    }
-    return -1;
-}
-
-/**
- * Sets the SIGINT signal to be ignored when received
- */
-void sigint_ignore() {
-    struct sigaction sa;
-
-    // We set the handler to ignore the signal
-    sigemptyset(&sa.sa_mask); // We empty the mask
-    sa.sa_handler = SIG_IGN; // We set the handler to SIG_IGN
-    sa.sa_flags = 0; // We set the flags to 0
-
-    if(sigaction(SIGINT, &sa, NULL) == -1) {
-        // We control the return value of sigaction
-        perror("sigaction");
-    }
-}
-
-/**
- * We set the SIGINT signal to be handled by the default handler
- */
-void sigint_default() {
-    struct sigaction sa;
-
-    // Clear the sigaction structure
-    sigemptyset(&sa.sa_mask);
-    sa.sa_handler = SIG_DFL;
-    sa.sa_flags = 0;
-
-    if (sigaction(SIGINT, &sa, NULL) == -1) {
-        perror("Failed to reset SIGINT to default");
-    }
-}
+/* ---------------- End Redirections ----------------- */

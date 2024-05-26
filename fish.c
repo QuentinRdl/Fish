@@ -33,11 +33,13 @@ int exitFish(struct cmd command);
 void handle_redirections(char *input_file, char *output_file, int const append_mode);
 // void sigint_handler(int const signum);
 void sigint_handler();
-void sigint_default(struct sigaction sigint_default);
 
 void sigchld_handler(int const signum);
 void print_finished_bg_processes();
 int exeInternCommand(struct line const li);
+
+void sigint_ignore();
+void sigint_default();
 
 void print_queue();
 
@@ -60,13 +62,10 @@ size_t nbBgProcesses = 0;
 struct bg_status_queue bg_status = {NULL, NULL};
 
 int main() {
-
     char buf[BUFLEN];
 
     struct line li;
     line_init(&li);
-
-    // struct sigaction sigaction_action = sigint_handler();
 
     for (;;) {
         // We handle the signal for SIGCHLD
@@ -79,73 +78,25 @@ int main() {
             exit(EXIT_FAILURE);
         }
 
-        sa.sa_handler = sigint_handler;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
+        print_finished_bg_processes();
+        // We set the sigaction signal to be ignore
+        sigint_ignore();
 
-        if(sigaction(SIGINT, &sa, NULL) == -1) {
-            perror("sigaction");
-            exit(EXIT_FAILURE);
-        }
-        /*
-        sa.sa_handler = sigint_handler;
-        // C
-        // lear the sa_mask to avoid blocking any signals while handling SIGINT
-        sigemptyset(&sa.sa_mask);
-        // Set flags to 0
-        sa.sa_flags = 0;
-
-        if (sigaction(SIGINT, &sa, NULL) == -1) {
-            perror("Sigaction");
-            exit(EXIT_FAILURE);
-        }
-
-        */
         char pwd[1024];
         getcwd(pwd, 1024);
         fprintf(stdout, "%s%s%s\n", GRAY, pwd, NC);
         fprintf(stdout, "%sFish> %s", BLUE, NC);
         fgets(buf, BUFLEN, stdin);
 
-        int err = line_parse(&li, buf);
+        int const err = line_parse(&li, buf);
         if (err) {
             // The command line entered by the user isn't valid
             line_reset(&li);
             continue;
         }
         printCommandLine(li);
-
-
-        // case where li is a simple command with or without arguments, but no pipes '|'
-        if (li.n_cmds == 1 && li.cmds[0].n_args == 1) {
-            if (DEBUG) printf("%sSimple command!%s\n", GREEN, NC);
-            exeCommand(li);
-        }
-        else if (li.n_cmds == 1 && li.cmds[0].n_args > 1) {
-            // Case where li is a simple command with arguments
-            if (DEBUG) printf("%sSimple command WITH arguments!%s\n", GREEN, NC);
-            exeCommand(li);
-        }
-        else exeCommand(li);
-
-        /* No entry redirection, output redirection TRUC MODE
-        char *args[] = {"ls", NULL};
-        handle_redirections(NULL, "output.txt", 0);
-        execvp(args[0], args);
-        */
-
-        /* Entry redirection from input.txt, redirection APPEND mode
-        char *args[] = {"cat", NULL};
-        handle_redirections("input.txt", "output.txt", 1);
-        execvp(args[0], args);
-        */
-
-        /* Redirection entry from input.txt, no output redirection
-        char *args[] = {"grep", "pattern", NULL};
-        handle_redirections("input.txt", NULL, 0);
-        execvp(args[0], args);
-        */
-
+        exeCommand(li); // We execute the command
+        print_finished_bg_processes(); // Print the finished background processes
         line_reset(&li);
     }
     return 0;
@@ -188,7 +139,6 @@ int exitFish(struct cmd command) {
         fprintf(stderr, "%sexit: Invalid argument \"%s\", must be a number%s\n", RED, command.args[1], NC);
     }
     // We exit with the code given by the user
-    printf("\n\n\nABOUT TO EXIT\n\n\n\n");
     exit((int)exitStatus);
 }
 
@@ -313,6 +263,12 @@ void exeCommand(struct line const li) {
             return;
         }
     }
+
+    if(!li.background) {
+        // We de-ignore the SIGINT signal for the foreground process
+        sigint_default();
+    }
+
     // Create pipes
     for (int i = 0; i < num_pipes; i++) {
         if (pipe(pipefds + i * 2) == -1) {
@@ -367,9 +323,10 @@ void exeCommand(struct line const li) {
             perror("fork");
             exit(EXIT_FAILURE);
         } else {
-            printf("parent process pid %d\n", getpid());
+            if(DEBUG) printf("parent process pid %d\n", getpid());
         }
 
+        sigint_ignore();
         // If this is a background cmd we add it to the queue
         if(li.background) {
             printf("Treating a background command,with a pid of %d we add it to the queue\n", pid);
@@ -407,7 +364,6 @@ void exeCommand(struct line const li) {
         // We print the exit status of the background processes that have finished
         printf("We print the finished background processes\n");
         print_finished_bg_processes();
-
     }
 
 }
@@ -694,12 +650,6 @@ struct sigaction sigint_handler() {
 }
 */
 
-void sigint_default(struct sigaction sigint_default) {
-    sigemptyset(&sigint_default.sa_mask);
-    sigint_default.sa_flags = SA_RESTART;
-    sigint_default.sa_handler = SIG_DFL; // We set the handler to the default value
-    sigint_default.sa_restorer = NULL; // We set the restorer to NULL
-}
 /**
  * Handles the SIGCHLD signal sent by child processes when they terminate.
  * This function is a signal handler for the SIGCHLD signal. When a child process
@@ -770,24 +720,22 @@ void sigchld_handler(int const signum) {
 }
 */
 void sigchld_handler(int signum) {
-    printf("SIGCHLD HANDLER %d\n", signum);
+    if(DEBUG) printf("SIGCHLD HANDLER %d\n", signum);
     int status;
     pid_t pid;
-    char buffer[128];
 
     struct bg_status_node *current = bg_status.head;
     while(current) {
         pid = current->pid;
-        if (waitpid(pid, &status, WNOHANG) > 0) {
+        if (pid != -1 && waitpid(pid, &status, WNOHANG) > 0) {
             if (WIFEXITED(status)) {
-                int n = snprintf(buffer, sizeof(buffer), " BG: Command `%d` exited with status %d\n", pid, WEXITSTATUS(status));
-                if (n > 0) write(STDERR_FILENO, buffer, n);
+                if(DEBUG) fprintf(stderr,"%sBG : Command `%d` exited with status %d%s\n", BLUE, pid, WEXITSTATUS(status),NC);
+                current->finished = true;
             }
             else if (WIFSIGNALED(status)) {
-                int n = snprintf(buffer, sizeof(buffer), " BG: Command `%d` killed by signal %d\n", pid, WTERMSIG(status));
-                if (n > 0) write(STDERR_FILENO, buffer, n);
+                // fprintf(stderr, "%sBG : Command `%d` killed by signal %d%s\n", BLUE, pid, WTERMSIG(status), NC);
+                current->finished = true;
             }
-            current->pid = -1;
         }
         current = current->next;
     }
@@ -799,12 +747,15 @@ void sigchld_handler(int signum) {
 void print_finished_bg_processes() {
     struct bg_status_node *current = bg_status.head;
     struct bg_status_node *prev = NULL;
+    printf("pritin\n");
     if(current == NULL) {
-        printf("No background process in the queue\n");
+        if(DEBUG) printf("No background process in the queue\n");
     }
     while(current) {
-        if(current->finished) {
+        printf("WA");
+        if(current->pid != 1 && current->finished) {
             fprintf(stderr, "%sQUEUE -> BG : Process %d exited with status %d%s\n", BLUE, current->pid, current->status, NC);
+            printf("NO");
             if(prev) {
                 prev->next = current->next;
                 free(current);
@@ -849,4 +800,37 @@ int exeInternCommand(struct line const li) {
         return 0;
     }
     return -1;
+}
+
+/**
+ * Sets the SIGINT signal to be ignored when received
+ */
+void sigint_ignore() {
+    struct sigaction sa;
+
+    // We set the handler to ignore the signal
+    sigemptyset(&sa.sa_mask); // We empty the mask
+    sa.sa_handler = SIG_IGN; // We set the handler to SIG_IGN
+    sa.sa_flags = 0; // We set the flags to 0
+
+    if(sigaction(SIGINT, &sa, NULL) == -1) {
+        // We control the return value of sigaction
+        perror("sigaction");
+    }
+}
+
+/**
+ * We set the SIGINT signal to be handled by the default handler
+ */
+void sigint_default() {
+    struct sigaction sa;
+
+    // Clear the sigaction structure
+    sigemptyset(&sa.sa_mask);
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = 0;
+
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("Failed to reset SIGINT to default");
+    }
 }

@@ -37,6 +37,7 @@ void sigint_default(struct sigaction sigint_default);
 
 void sigchld_handler(int const signum);
 void print_finished_bg_processes();
+int exeInternCommand(struct line const li);
 
 void print_queue();
 
@@ -55,6 +56,7 @@ struct bg_status_queue {
 
 // TODO : Make a header file for functions declarations and structures
 pid_t foreground_pid = -2; // Used to store the pid of the foreground process
+size_t nbBgProcesses = 0;
 struct bg_status_queue bg_status = {NULL, NULL};
 
 int main() {
@@ -190,6 +192,11 @@ int exitFish(struct cmd command) {
     exit((int)exitStatus);
 }
 
+/**
+ * Changes the current directory
+ * \param command the command to execute
+ * \return -1 if execution failed, 0 if the cd works
+ */
 int cd(struct cmd command) {
     char *finalPath = NULL;
     char *first_arg = NULL;
@@ -197,7 +204,7 @@ int cd(struct cmd command) {
 
     // Check if there is no arguments we go to home dir
     if (command.n_args == 1) {
-        printf("\n\n\n\nHOME=%s\n\n\n\n", getenv("HOME"));
+        if(DEBUG)printf("HOME = %s\n", getenv("HOME"));
         finalPath = getenv("HOME");
     } else if (command.n_args != 2) { // Check if there is too many args
         fprintf(stderr, "%sErrror !%s Too many arguments for %s'cd'%s command\n", RED, NC, GREEN, NC);
@@ -211,7 +218,7 @@ int cd(struct cmd command) {
             // We check if only '~' was given
             if (first_arg[1] == '\0') {
                 // Only '~' was given
-                printf("// Only '~' was given");
+                if(DEBUG) printf("// Only '~' was given");
                 finalPath = getenv("HOME");
             } else {
                 finalPath = malloc(strlen(getenv("HOME")) + strlen(first_arg) + 1); // +1 for null char
@@ -220,9 +227,10 @@ int cd(struct cmd command) {
                     return -1;
                 }
                 strcpy(finalPath, getenv("HOME"));
+                strcat(finalPath, "/");
                 strcat(finalPath, &first_arg[1]);
 
-                printf("\nFINALPATH=%s\n", finalPath);
+                if(DEBUG) printf("\nFINALPATH=%s\n", finalPath);
             }
         } else {
             // If we are here then we have the correct number of args,
@@ -233,7 +241,6 @@ int cd(struct cmd command) {
 
     if (chdir(finalPath) == -1) {
         // If there is a problem with chdir
-        if (DEBUG) printf("\n\n\nCATASTROPHEEEE\n\n\n");
         if (first_char == '~' && first_arg[1] != '\0') {
             // it means we have malloc'ed' finalPath so we must free it
             free(finalPath);
@@ -299,6 +306,13 @@ void exeCommand(struct line const li) {
     pid_t pid;
     int status;
 
+    // We look if there is only a command, because it can be an intern command
+    if (li.n_cmds == 1) {
+        if(exeInternCommand(li) == 0) {
+            // We have executed an intern command, we return
+            return;
+        }
+    }
     // Create pipes
     for (int i = 0; i < num_pipes; i++) {
         if (pipe(pipefds + i * 2) == -1) {
@@ -370,6 +384,7 @@ void exeCommand(struct line const li) {
             } else {
                 bg_status.head = node;
             }
+            nbBgProcesses++;
         } else {
             printf("Treating foreground process of pid : %d\n", pid);
         }
@@ -693,6 +708,7 @@ void sigint_default(struct sigaction sigint_default) {
  *
  * @param signum The signal number. Should always be SIGCHLD in this context.
  */
+/*
 void sigchld_handler(int const signum) {
     printf("%sSIGCHLD signal received%s\n", RED, NC);
     // int status;
@@ -752,6 +768,31 @@ void sigchld_handler(int const signum) {
     }
     // print_queue(); // For debug
 }
+*/
+void sigchld_handler(int signum) {
+    printf("SIGCHLD HANDLER %d\n", signum);
+    int status;
+    pid_t pid;
+    char buffer[128];
+
+    struct bg_status_node *current = bg_status.head;
+    while(current) {
+        pid = current->pid;
+        if (waitpid(pid, &status, WNOHANG) > 0) {
+            if (WIFEXITED(status)) {
+                int n = snprintf(buffer, sizeof(buffer), " BG: Command `%d` exited with status %d\n", pid, WEXITSTATUS(status));
+                if (n > 0) write(STDERR_FILENO, buffer, n);
+            }
+            else if (WIFSIGNALED(status)) {
+                int n = snprintf(buffer, sizeof(buffer), " BG: Command `%d` killed by signal %d\n", pid, WTERMSIG(status));
+                if (n > 0) write(STDERR_FILENO, buffer, n);
+            }
+            current->pid = -1;
+        }
+        current = current->next;
+    }
+}
+
 
 // Prints the commands in the queue that finished running, and their exit status
 // And we remove them from the queue
@@ -787,4 +828,25 @@ void print_queue() {
         printf("PID : %d\n", current->pid);
         current = current->next;
     }
+}
+
+/**
+ * Executes intern commands 'cd' and 'exit'
+ * Or nothing if the command is not an intern command
+ * \param li the line to execute
+ * */
+int exeInternCommand(struct line const li) {
+    const int internCommand = detectInternCommand(li.cmds[0]);
+    if (internCommand == 0) {
+        // We have a 'cd' command
+        if (DEBUG) printf("CD\n");
+        cd(li.cmds[0]);
+        return 0;
+    } else if (internCommand == 1) {
+        // We have a 'exit' command
+        printf("%sexiting fish...%s\n", RED, NC);
+        exitFish(li.cmds[0]);
+        return 0;
+    }
+    return -1;
 }

@@ -1,24 +1,3 @@
-/*  Quentin RADLO TP1A
-    Fait : SIGINT géré
-    Commandes simples ou non, avec des tubes et en BG marche
-    en FG aussi.
-    Commandes internes implémentées.
-    J'ai veillé au cas ou l'user utilise :
-    'cd ~repertoire' ce qui équivaut à un '~/repertoire'
-    l'utilisateur ne peut pas utiliser exit s'il n'utilise pas
-    les bons paramètres (trop d'arguments / pas un entier).
-
-    Problèmes : des blocs encore reachable avec valgrind :
-    '==14946==    still reachable: 5 bytes in 1 blocks'
-    Quand on fait des sleep à la suite en background, les
-    process zombies ne sont pas bien récupérés.
-    Une fois les process en backgrounds finis leur état est
-    directement affichés, j'ai commencé à implémenter une liste pour
-    gèrer ce cas et attendre la fin des process en avant plan
-    mais cela m'a prit beaucoup trop de temps, et je n'ai pas réussi donc
-    il reste des fantomes de cette implémentation dans mon code, car mon SIGCHLD
-    utilise encore cette structure de données.
-    */
 #define _POSIX_C_SOURCE 199309L
 #define _XOPEN_SOURCE 700
 
